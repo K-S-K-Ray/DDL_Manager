@@ -1,0 +1,27 @@
+# IDE 配置（PyCharm）
+.idea/
+
+# 打包相关
+build/
+dist/
+*.spec
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 数据文件（用户数据，不提交）
+tasks.json
+tasks_backup.json
+
+# 导出的 CSV 文件（每次导出名称不同，不提交）
+tasks_*.csv
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.log
+*.tmp

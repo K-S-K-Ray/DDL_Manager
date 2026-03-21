@@ -6,12 +6,12 @@ import os
 import shutil
 from datetime import datetime
 from colorama import init, Fore, Back, Style
-
-# 初始化colorama
-init(autoreset=True)
+from plyer import notification
 
 # 数据文件路径
 DATA_FILE = "tasks.json"
+course_CUTOFF = 0.2
+desc_CUTOFF = 0.1
 
 """  数据结构：
 tasks: [{}, {}, {}, ...]
@@ -23,6 +23,7 @@ tasks: [{}, {}, {}, ...]
     "completed": False                   # 是否完成，布尔值
 }
 """
+
 
 # ==============================数据操作==============================
 def load_tasks():
@@ -52,6 +53,24 @@ def save_tasks(tasks):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(tasks, f, ensure_ascii=False, indent=2)
 
+def check_today_tasks(tasks):
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_tasks = [t for t in tasks if not t.get('completed') and t['ddl'].startswith(today)]
+    if today_tasks:
+        try:
+            from plyer import notification
+            msg = "\n".join([f"{t['course']}: {t['ddl']}" for t in today_tasks])
+            notification.notify(
+                title="📅 今日到期的作业",
+                message=msg,
+                timeout=10
+            )
+        except Exception as e:
+            # 通知失败时，改为控制台输出，不中断程序
+            print("\n⚠️ 桌面通知不可用，以下是今日到期作业：")
+            for t in today_tasks:
+                print(f"  {t['course']} - {t['ddl']}")
+
 # ===============================工具函数===============================
 def validate_datetime(datetime_str):
     """校验日期时间字符串格式是否为 YYYY-MM-DD HH:MM，成功返回 datetime 对象，失败返回 None"""
@@ -72,28 +91,68 @@ def days_until(ddl_str):
 
 def filter_tasks_by_course(tasks, course_keyword):
     """根据课程关键词模糊匹配（包含+相似度）"""
-    if not course_keyword:
+    if not course_keyword:  # 无筛选条件，默认直接返回
         return tasks
+
     keyword = course_keyword.lower().strip()
 
     # 先尝试包含匹配（不区分大小写）
     exact_matches = [t for t in tasks if keyword in t['course'].lower()]
-    if exact_matches:
-        return exact_matches  # 有包含匹配就直接返回
 
-    # 如果没有包含匹配，则计算相似度，找出相似度最高的课程
+    # 计算相似度
     # 获取所有课程名（去重）
     all_courses = list({t['course'] for t in tasks})
-    # 获取最相似的几个课程名（cutoff 可调整相似度阈值）
+    # 获取相似的几个课程名（cutoff 可调整相似度阈值）
     # 为避免因搜索不到而遗漏作业，cutoff值设置较低
-    close_matches = difflib.get_close_matches(keyword, all_courses, n=len(all_courses), cutoff=0.1)
+    close_matches_str = difflib.get_close_matches(keyword, all_courses, n=len(all_courses), cutoff=course_CUTOFF)
+    close_matches = []
 
-    if close_matches:
-        print(f"您是不是想找：{', '.join(close_matches)}？将显示这些课程的作业")
+    if close_matches_str:
+        print(f"您是否想找：{', '.join(close_matches_str)}？将显示这些课程的作业")
         # 返回所有课程名在 close_matches 中的任务
-        return [t for t in tasks if t['course'] in close_matches]
-    else:
-        return []  # 没找到匹配
+        close_matches = [t for t in tasks if t['course'] in close_matches_str and t not in exact_matches]
+
+    return exact_matches + close_matches
+
+def filter_tasks_by_description(tasks, desc_keyword):
+    """根据描述关键词模糊匹配（包含+相似度）"""
+    if not desc_keyword:  # 无筛选条件，默认直接返回
+        return tasks
+
+    keyword = desc_keyword.lower().strip()
+
+    # 先尝试包含匹配（不区分大小写）
+    exact_matches = [t for t in tasks if keyword in t['description'].lower()]
+
+    # 计算相似度
+    # 获取所有作业描述（去重）
+    all_desc = list({t['description'] for t in tasks})
+    # 获取相似的几个描述（cutoff 可调整相似度阈值）
+    # 为避免因搜索不到而遗漏作业，cutoff值设置较低
+    close_matches_str = difflib.get_close_matches(keyword, all_desc, n=len(all_desc), cutoff=desc_CUTOFF)
+    close_matches = []
+
+    if close_matches_str:
+        separator = '；\n    '
+        print(f"您是否想找：\n    {separator.join(close_matches_str)}？\n将显示与这些描述相关的作业")
+        close_matches = [t for t in tasks if t['description'] in close_matches_str and t not in exact_matches]
+
+    return exact_matches + close_matches
+
+def sort_key(task):
+    """排序键：先按是否完成（未完成在前），再按剩余天数（紧急在前）"""
+    days = days_until(task['ddl'])
+    # 未完成且已过期的优先级最高（给个负数）
+    if not task.get('completed') and days is not None and days < 0:
+        priority = 0
+    elif not task.get('completed') and days is not None and days <= 3:
+        priority = 1
+    elif not task.get('completed'):
+        priority = 2
+    else:  # 已完成
+        priority = 3
+    # 返回元组，先按优先级，再按截止时间
+    return (priority, task['ddl'])
 
 # ===============================任务操作===============================
 def add_task(tasks):
@@ -134,11 +193,12 @@ def show_tasks(tasks):
         input("\n按 Enter 键继续...")
         return tasks
 
+    display_tasks = tasks
     # ==========按课程筛选==========
     filter_choice = input("是否按课程筛选？(y/n，默认n): ").strip().lower()
     if filter_choice == 'y' or filter_choice == 'yes':
         course_keyword = input("请输入课程名称（支持模糊匹配）: ").strip()
-        display_tasks = filter_tasks_by_course(tasks, course_keyword)
+        display_tasks = filter_tasks_by_course(display_tasks, course_keyword)
         if not display_tasks:
             print(f"没有找到课程包含 '{course_keyword}' 的作业")
             input("\n按 Enter 键继续...")
@@ -150,7 +210,7 @@ def show_tasks(tasks):
         desc_keyword = input("请输入描述关键词: ").strip().lower()
         if desc_keyword:
             # 在 display_tasks 基础上进一步筛选
-            display_tasks = [t for t in display_tasks if desc_keyword in t['description'].lower()]
+            display_tasks = filter_tasks_by_description(display_tasks, desc_keyword)
             if not display_tasks:
                 print(f"没有找到描述包含 '{desc_keyword}' 的作业")
                 input("\n按 Enter 键继续...")
@@ -158,7 +218,7 @@ def show_tasks(tasks):
 
     # ==========打印作业列表==========
     # 按截止时间排序
-    sorted_tasks = sorted(display_tasks, key=lambda t: t['ddl'])
+    sorted_tasks = sorted(display_tasks, key=sort_key)
 
     for i, task in enumerate(sorted_tasks, 1):
         # 计算剩余天数（调用days_until()函数）
@@ -171,7 +231,7 @@ def show_tasks(tasks):
             color = Fore.YELLOW
         elif days < 0:
             status = "⏰"
-            color = Fore.RED + Back.YELLOW
+            color = Fore.RED + Back.LIGHTYELLOW_EX
         elif days <= 3:
             status = "🔥"
             color = Fore.RED
@@ -212,14 +272,14 @@ def show_tasks(tasks):
     stats_choice = input("\n是否显示按课程统计？(y/n，默认n): ").strip().lower()
     if stats_choice in ('y', 'yes'):
         # 统计每个课程的作业数、完成数
-        course_stats = {}
+        course_stats = {}  # 字典，记录每门课作业总数和完成的作业数
         for t in tasks:
-            course = t['course']
-            if course not in course_stats:
+            course = t['course']  # 遍历所有课程
+            if course not in course_stats:  # 如果该课程没添加过，添加到课程字典
                 course_stats[course] = {'total': 0, 'completed': 0}
-            course_stats[course]['total'] += 1
-            if t.get('completed'):
-                course_stats[course]['completed'] += 1
+            course_stats[course]['total'] += 1  # 每遍历到一个作业，对应课程作业总数加一
+            if t.get('completed'):  # 判断当前作业是否完成
+                course_stats[course]['completed'] += 1  # 完成则完成数加一
 
         print("\n--- 按课程统计 ---")
         for course, stats in course_stats.items():
@@ -242,7 +302,7 @@ def mark_completed(tasks):
     print("\n--- 选择要标记完成的作业 ---")
     for i, task in enumerate(tasks, 1):
         status = "✅" if task.get('completed') else "⏳"
-        print(f"{i}. {status} {task['course']} - 截止: {task['ddl']}")
+        print(f"{i}. {status} {task['course']} - 截止: {task['ddl']}\n    描述：{task['description']}")
 
     try:
         idx = int(input("请输入要标记的作业编号: ")) - 1
@@ -273,7 +333,7 @@ def delete_task(tasks):
     for i, task in enumerate(tasks, 1):
         status = "✅" if task.get('completed') else "⏳"
         # 简单显示，不需要颜色，以免干扰
-        print(f"{i}. {status} {task['course']} - 截止: {task['ddl']}")
+        print(f"{i}. {status} {task['course']} - 截止: {task['ddl']}\n    描述：{task['description']}")
 
     try:
         idx = int(input("请输入要删除的作业编号: ")) - 1
@@ -302,10 +362,10 @@ def edit_task(tasks):
         return tasks
 
     print("\n--- 选择要修改的作业 ---")
-    # 显示所有作业（带编号、状态、课程、截止时间）
+    # 显示所有作业（带编号、状态、课程、描述、截止时间）
     for i, task in enumerate(tasks, 1):
         status = "✅" if task.get('completed') else "⏳"
-        print(f"{i}. {status} {task['course']} - 截止: {task['ddl']}")
+        print(f"{i}. {status} {task['course']} - 截止: {task['ddl']}\n    描述：{task['description']}")
 
     try:
         idx = int(input("请输入要修改的作业编号: ")) - 1
@@ -379,12 +439,18 @@ def export_to_csv(tasks):
 
 # ===============================主程序入口==============================
 def main():
+    # 初始化colorama
+    init(autoreset=True)
+
     tasks = load_tasks()  # 启动时加载已有任务
+    check_today_tasks(tasks)
+
     print("=" * 30)
-    print("    西电 DDL 管家")
+    print("           DDL管家")
     print("=" * 30)
 
     while True:
+        tasks = sorted(tasks, key=sort_key)
         print("\n请选择操作：")
         print("1. 添加作业")
         print("2. 查看所有作业")
@@ -420,3 +486,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# pyinstaller --onefile --name DDL管家 ddl_manager.py
+
+# pyinstaller --onefile --name DDL管家 --hidden-import plyer.platforms.win.notification --hidden-import pywin32 ddl_manager.py
